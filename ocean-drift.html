@@ -103,6 +103,21 @@
 
   .sep{width:1px;align-self:stretch;background:var(--line)}
 
+  /* zoom controls */
+  #zoomctl{
+    position:fixed;right:18px;bottom:84px;z-index:5;display:flex;flex-direction:column;gap:6px;
+  }
+  #zoomctl button{
+    width:38px;height:38px;border-radius:10px;border:1px solid var(--line);
+    background:var(--panel);backdrop-filter:blur(8px);color:var(--ink);
+    font-size:19px;font-weight:600;cursor:pointer;display:flex;align-items:center;justify-content:center;
+    box-shadow:0 8px 24px rgba(0,0,0,.4);transition:.15s;line-height:1;
+  }
+  #zoomctl button:hover{background:#19344a;border-color:#27465c}
+  #zoomctl button:focus-visible{outline:2px solid var(--drift);outline-offset:2px}
+  #zoomctl button svg{width:17px;height:17px}
+  @media (max-width:720px){ #zoomctl{bottom:96px;right:12px} }
+
   /* provenance */
   #prov{
     position:fixed;left:18px;bottom:14px;z-index:4;font-size:10.5px;color:var(--ink-dim);
@@ -133,7 +148,7 @@
   <div class="s">Surface-drift simulator</div>
 </div>
 
-<div id="hint"><span class="b"></span>Tap anywhere on the ocean to drop your bottle</div>
+<div id="hint"><span class="b"></span>Tap the ocean to drop your bottle &middot; scroll or pinch to zoom &middot; drag to pan</div>
 
 <div id="dock">
   <button class="btn primary" id="play" aria-label="Play or pause">
@@ -159,6 +174,14 @@
   </div>
   <div class="sep"></div>
   <label class="toggle"><input type="checkbox" id="showCur" checked> Currents</label>
+</div>
+
+<div id="zoomctl">
+  <button id="zin" aria-label="Zoom in" title="Zoom in">+</button>
+  <button id="zout" aria-label="Zoom out" title="Zoom out">&minus;</button>
+  <button id="zworld" aria-label="Whole world" title="Whole world">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></svg>
+  </button>
 </div>
 
 <div id="prov"></div>
@@ -222,12 +245,30 @@ window.OCEAN_COAST=[[-59.6,-80.0,-59.9,-80.5,-60.2,-81.0,-62.3,-80.9,-64.5,-80.9
   }
   function isOcean(lon,lat){ return sample(lon,lat)!==null; }
 
-  // ---------- projection (equirectangular, full globe for coastline) ----------
+  // ---------- projection (equirectangular) with zoom + pan ----------
+  // world coords are normalised: wx=(lon+180)/360 in [0,1], wy=(90-lat)/180 in [0,1].
+  // the view shows a sub-rectangle of width 1/Z anchored at (oX,oY).
   var W=0,H=0,DPR=1;
-  function lon2x(lon){ return (lon+180)/360*W; }
-  function lat2y(lat){ return (90-lat)/180*H; }
-  function x2lon(x){ return x/W*360 - 180; }
-  function y2lat(y){ return 90 - y/H*180; }
+  var view={ Z:1, oX:0, oY:0 };           // Z>=1 zoom, (oX,oY) top-left of visible window
+  function clampView(){
+    var span=1/view.Z;
+    view.oX=Math.max(0, Math.min(1-span, view.oX));
+    view.oY=Math.max(0, Math.min(1-span, view.oY));
+  }
+  function lon2x(lon){ return ((lon+180)/360 - view.oX)*view.Z*W; }
+  function lat2y(lat){ return ((90-lat)/180 - view.oY)*view.Z*H; }
+  function x2lon(x){ return (x/(view.Z*W) + view.oX)*360 - 180; }
+  function y2lat(y){ return 90 - (y/(view.Z*H) + view.oY)*180; }
+
+  function zoomAt(screenX, screenY, factor){
+    var lon=x2lon(screenX), lat=y2lat(screenY);          // geo under cursor (before)
+    view.Z=Math.max(1, Math.min(48, view.Z*factor));
+    // keep that geo point under the cursor
+    view.oX=(lon+180)/360 - screenX/(view.Z*W);
+    view.oY=(90-lat)/180 - screenY/(view.Z*H);
+    clampView();
+  }
+  function resetView(){ view.Z=1; view.oX=0; view.oY=0; }
 
   var cv=document.getElementById('c'), ctx=cv.getContext('2d');
   function resize(){
@@ -235,6 +276,7 @@ window.OCEAN_COAST=[[-59.6,-80.0,-59.9,-80.5,-60.2,-81.0,-62.3,-80.9,-64.5,-80.9
     W=cv.clientWidth; H=cv.clientHeight;
     cv.width=Math.round(W*DPR); cv.height=Math.round(H*DPR);
     ctx.setTransform(DPR,0,0,DPR,0,0);
+    clampView();
   }
   window.addEventListener('resize', resize);
 
@@ -328,19 +370,21 @@ window.OCEAN_COAST=[[-59.6,-80.0,-59.9,-80.5,-60.2,-81.0,-62.3,-80.9,-64.5,-80.9
 
   function drawCurrents(){
     if(!P.showCur) return;
-    var stepDeg=5, len=0.42; // degrees, scale of streak
+    var px=42;                              // on-screen spacing between streaks
+    var streak=px*0.62;                     // streak length scale (px per m/s-ish)
     ctx.lineWidth=1; ctx.lineCap='round';
-    for(var lat=80;lat>=-80;lat-=stepDeg){
-      for(var lon=-180;lon<180;lon+=stepDeg){
+    for(var sy=px*0.5; sy<H; sy+=px){
+      for(var sx=px*0.5; sx<W; sx+=px){
+        var lon=x2lon(sx), lat=y2lat(sy);
+        if(lon<-180||lon>180||lat>89||lat<-89) continue;
         var s=sample(lon,lat); if(!s) continue;
         var sp=Math.hypot(s[0],s[1]); if(sp<0.04) continue;
-        var x=lon2x(lon), y=lat2y(lat);
-        var coslat=Math.max(0.15,Math.cos(lat*Math.PI/180));
-        var ex=lon2x(lon + s[0]/coslat*len*4), ey=lat2y(lat + s[1]*len*4);
-        if(Math.abs(ex-x)>W/2) continue; // seam guard
-        var a=Math.min(.5, .12+sp*0.5);
+        var ang=Math.atan2(-s[1], s[0]);    // screen y is down, so negate v
+        var L=Math.min(px*0.9, 6+sp*streak);
+        var ex=sx+Math.cos(ang)*L, ey=sy+Math.sin(ang)*L;
+        var a=Math.min(.55, .12+sp*0.6);
         ctx.strokeStyle='rgba(120,200,235,'+a.toFixed(3)+')';
-        ctx.beginPath(); ctx.moveTo(x,y); ctx.lineTo(ex,ey); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(sx,sy); ctx.lineTo(ex,ey); ctx.stroke();
       }
     }
   }
@@ -462,20 +506,66 @@ window.OCEAN_COAST=[[-59.6,-80.0,-59.9,-80.5,-60.2,-81.0,-62.3,-80.9,-64.5,-80.9
     }
   });
 
-  // ---------- pointer ----------
+  // ---------- pointer: drag to pan, wheel/pinch to zoom, tap to drop ----------
   var lastDrop=null;
-  function pointer(ev){
-    var rect=cv.getBoundingClientRect();
-    var cx=(ev.touches?ev.touches[0].clientX:ev.clientX)-rect.left;
-    var cy=(ev.touches?ev.touches[0].clientY:ev.clientY)-rect.top;
-    var lon=x2lon(cx), lat=y2lat(cy);
-    if(!isOcean(lon,lat)){ flashHint("That\u2019s on land \u2014 tap open water"); return; }
-    lastDrop=[lon,lat];
-    release(lon,lat);
-    setPlaying(true);
+  var pointers={}, panPx=null, pinchDist=null, pinchMid=null, downXY=null, moved=false;
+  function rel(ev){ var r=cv.getBoundingClientRect(); return [ev.clientX-r.left, ev.clientY-r.top]; }
+
+  function dropAt(sx,sy){
+    var lon=x2lon(sx), lat=y2lat(sy);
+    if(isOcean(lon,lat)){ lastDrop=[lon,lat]; release(lon,lat); setPlaying(true); return; }
+    flashHint("No drift data at that spot \u2014 try open ocean. This field covers the open oceans, not enclosed seas like the Mediterranean or Black Sea.");
   }
-  cv.addEventListener('click',pointer);
-  cv.addEventListener('touchstart',function(e){e.preventDefault();pointer(e);},{passive:false});
+
+  cv.addEventListener('pointerdown',function(ev){
+    cv.setPointerCapture(ev.pointerId);
+    pointers[ev.pointerId]=rel(ev);
+    var ids=Object.keys(pointers);
+    if(ids.length===1){ panPx=pointers[ev.pointerId]; downXY=panPx.slice(); moved=false; cv.style.cursor='grabbing'; }
+    else if(ids.length===2){ var a=pointers[ids[0]],b=pointers[ids[1]];
+      pinchDist=Math.hypot(a[0]-b[0],a[1]-b[1]); pinchMid=[(a[0]+b[0])/2,(a[1]+b[1])/2]; }
+  });
+  cv.addEventListener('pointermove',function(ev){
+    if(!(ev.pointerId in pointers)) return;
+    pointers[ev.pointerId]=rel(ev);
+    var ids=Object.keys(pointers);
+    if(ids.length>=2){
+      var a=pointers[ids[0]],b=pointers[ids[1]];
+      var d=Math.hypot(a[0]-b[0],a[1]-b[1]), mid=[(a[0]+b[0])/2,(a[1]+b[1])/2];
+      if(pinchDist){ zoomAt(mid[0],mid[1], d/pinchDist); }
+      if(pinchMid){ view.oX-=(mid[0]-pinchMid[0])/(view.Z*W); view.oY-=(mid[1]-pinchMid[1])/(view.Z*H); clampView(); }
+      pinchDist=d; pinchMid=mid; moved=true;
+    } else if(panPx){
+      var p=pointers[ev.pointerId];
+      view.oX-=(p[0]-panPx[0])/(view.Z*W);
+      view.oY-=(p[1]-panPx[1])/(view.Z*H);
+      clampView(); panPx=p;
+      if(downXY && Math.hypot(p[0]-downXY[0],p[1]-downXY[1])>6) moved=true;
+    }
+  });
+  function endPointer(ev){
+    var was1=Object.keys(pointers).length===1;
+    delete pointers[ev.pointerId];
+    if(Object.keys(pointers).length<2){ pinchDist=null; pinchMid=null; }
+    if(Object.keys(pointers).length===0){
+      cv.style.cursor='grab';
+      if(was1 && !moved && downXY){ dropAt(downXY[0],downXY[1]); }
+      panPx=null; downXY=null;
+    }
+  }
+  cv.addEventListener('pointerup',endPointer);
+  cv.addEventListener('pointercancel',endPointer);
+  cv.addEventListener('wheel',function(ev){
+    ev.preventDefault();
+    var xy=rel(ev);
+    zoomAt(xy[0],xy[1], Math.exp(-ev.deltaY*0.0015));
+  },{passive:false});
+  cv.style.cursor='grab';
+
+  // zoom buttons
+  document.getElementById('zin').addEventListener('click',function(){ zoomAt(W/2,H/2,1.5); });
+  document.getElementById('zout').addEventListener('click',function(){ zoomAt(W/2,H/2,1/1.5); });
+  document.getElementById('zworld').addEventListener('click',function(){ resetView(); });
 
   var hintTimer=null;
   function flashHint(msg){
@@ -483,7 +573,7 @@ window.OCEAN_COAST=[[-59.6,-80.0,-59.9,-80.5,-60.2,-81.0,-62.3,-80.9,-64.5,-80.9
     h.style.display=''; h.style.opacity='1';
     h.innerHTML='<span class="b"></span>'+msg;
     clearTimeout(hintTimer);
-    hintTimer=setTimeout(function(){ if(!dropped){h.innerHTML='<span class="b"></span>Tap anywhere on the ocean to drop your bottle';} else {h.style.opacity='0';setTimeout(function(){h.style.display='none';},420);} },1600);
+    hintTimer=setTimeout(function(){ if(!dropped){h.innerHTML='<span class="b"></span>Tap the ocean to drop your bottle &middot; scroll or pinch to zoom &middot; drag to pan';} else {h.style.opacity='0';setTimeout(function(){h.style.display='none';},420);} },2200);
   }
 
   // ---------- boot ----------
